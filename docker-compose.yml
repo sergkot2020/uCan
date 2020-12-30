@@ -1,0 +1,115 @@
+version: '3'
+volumes:
+    pgdata:
+        driver: local
+services:
+  nginx:
+    image: nginx:latest
+    container_name: nginx
+    volumes:
+      - ./bot/static:/srv/www/bot/static
+      - ./bot/files:/srv/www/bot/files
+      - ./bot/logs:/srv/www/bot/logs
+      - ./docker/nginx/bot.conf:/etc/nginx/conf.d/bot.conf
+      - ./bot/fullchain.pem:/srv/www/bot/fullchain.pem
+      - ./bot/privkey.pem:/srv/www/bot/privkey.pem
+    depends_on:
+      - bot_worker
+    ports:
+      - 80:80
+      - 443:443
+    networks:
+      - network
+    restart: unless-stopped
+
+  postgres:
+    hostname: postgres
+    image: postgres:latest
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: bot
+      PGDATA: /var/lib/postgresql/data
+    networks:
+      - network
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  rabbit:
+    image: rabbitmq:3.8-rc-management
+    hostname: rabbit
+    environment:
+      - RABBITMQ_DEFAULT_USER=admin
+      - RABBITMQ_DEFAULT_PASS=admin
+    networks:
+      - network
+    ports:
+      - "5672:5672"
+  bot_worker:
+    restart: always
+    build:
+      context: .
+      dockerfile: docker/bot_worker/Dockerfile
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_NAME: bot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_PORT: 5432
+      BROKER_URL: amqp://admin:admin@rabbit:5672
+    volumes:
+      - ./bot:/srv/www/bot
+    expose:
+      - 8000
+    command: "./entrypoint.sh"
+    networks:
+      - network
+    depends_on:
+      - rabbit
+      - postgres
+  celery:
+    restart: always
+    build:
+      context: .
+      dockerfile: docker/celery/Dockerfile
+    environment:
+      DJANGO_SETTINGS_MODULE: bot.settings
+      POSTGRES_HOST: postgres
+      POSTGRES_NAME: bot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_PORT: 5432
+      BROKER_URL: amqp://admin:admin@rabbit:5672
+    command:  "celery -A bot worker -l info --concurrency=3"
+    volumes:
+      - ./bot:/srv/www/bot
+    networks:
+      - network
+    depends_on:
+      - rabbit
+      - postgres
+  celery_beat:
+    restart: always
+    build:
+      context: .
+      dockerfile: docker/celery_beat/Dockerfile
+    environment:
+      DJANGO_SETTINGS_MODULE: bot.settings
+      POSTGRES_HOST: postgres
+      POSTGRES_NAME: bot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_PORT: 5432
+      BROKER_URL: amqp://admin:admin@rabbit:5672
+    command:  "celery -A bot beat -l INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler --pidfile=/tmp/celeryd.pid"
+    volumes:
+      - ./bot:/srv/www/bot
+    networks:
+      - network
+    depends_on:
+      - rabbit
+      - postgres
+networks:
+  network:
+    driver: bridge
